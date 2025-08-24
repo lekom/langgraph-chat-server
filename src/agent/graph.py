@@ -89,6 +89,82 @@ async def preprocess_query(state: State, runtime: Runtime[Context]) -> Dict[str,
     return {"needs_search": needs_search}
 
 
+async def generate_improved_query(state: State, original_query: str) -> str:
+    """Generate an improved search query based on conversation context."""
+    # Get conversation context (excluding tool messages)
+    context_messages = [msg for msg in state.messages if not isinstance(msg, ToolMessage)]
+    
+    if len(context_messages) <= 1:
+        # No prior context, return original query
+        return original_query
+    
+    # Build context string from recent conversation
+    context_parts = []
+    for msg in context_messages[-5:]:  # Last 5 messages for context
+        if isinstance(msg, dict):
+            msg_type = msg.get('type', 'unknown')
+            if msg_type == 'human':
+                content_data = msg.get('content', [])
+                if isinstance(content_data, list) and len(content_data) > 0:
+                    content = next((item['text'] for item in content_data if item.get('type') == 'text'), "")
+                else:
+                    content = str(content_data)
+                context_parts.append(f"Human: {content}")
+            elif msg_type == 'ai':
+                content_data = msg.get('content', [])
+                if isinstance(content_data, list) and len(content_data) > 0:
+                    content = next((item['text'] for item in content_data if item.get('type') == 'text'), "")
+                else:
+                    content = str(content_data)
+                context_parts.append(f"AI: {content}")
+        elif hasattr(msg, 'content'):
+            if hasattr(msg, 'type'):
+                context_parts.append(f"{msg.type}: {msg.content}")
+            else:
+                context_parts.append(f"Message: {msg.content}")
+    
+    context_string = "\n".join(context_parts)
+    
+    # Use LLM to generate improved query
+    model = ChatOpenAI(model='gpt-3.5-turbo', temperature=0)
+    
+    improvement_prompt = SystemMessage(
+        content="""You are a search query optimizer. Given a conversation context and a user's search query, generate a more specific and effective web search query.
+
+        Guidelines:
+        - If the query refers to pronouns (she, he, they, it), replace with specific names/entities from context
+        - Add relevant context terms that would improve search results
+        - Keep the query concise but specific
+        - Focus on searchable facts and proper nouns
+        - If no context is relevant, return the original query
+
+        Examples:
+        Context: "Tell me about Rebecca Patel, the tech entrepreneur"
+        Query: "has she ever been to jail"
+        Improved: "Rebecca Patel criminal history arrest record"
+
+        Context: "We were discussing the iPhone 15"
+        Query: "what are the specs"
+        Improved: "iPhone 15 technical specifications features"
+
+        Return ONLY the improved search query, no explanation.
+        """
+    )
+    
+    query_message = HumanMessage(
+        content=f"Context:\n{context_string}\n\nUser's query: {original_query}\n\nImproved query:"
+    )
+    
+    response = await model.ainvoke([improvement_prompt, query_message])
+    improved_query = response.content.strip()
+    
+    # Fallback to original if improvement is empty or too similar
+    if not improved_query or improved_query.lower() == original_query.lower():
+        return original_query
+    
+    return improved_query
+
+
 async def web_search(state: State, runtime: Runtime[Context]) -> Dict[str, Any]:
     """Perform web search and summarize results."""
     print("🌐 WEB_SEARCH: Starting search")
@@ -123,7 +199,11 @@ async def web_search(state: State, runtime: Runtime[Context]) -> Dict[str, Any]:
     else:
         query = str(human_message)
     
-    print(f"🌐 WEB_SEARCH: Query: '{query}'")
+    print(f"🌐 WEB_SEARCH: Original query: '{query}'")
+    
+    # Generate improved search query using conversation context
+    improved_query = await generate_improved_query(state, query)
+    print(f"🌐 WEB_SEARCH: Improved query: '{improved_query}'")
     
     # Create tool call ID for single comprehensive message
     tool_call_id = str(uuid.uuid4())
@@ -132,13 +212,13 @@ async def web_search(state: State, runtime: Runtime[Context]) -> Dict[str, Any]:
     try:
         search_tool = TavilySearchResults(max_results=5)
         # Use asyncio.to_thread to run blocking operation in separate thread
-        search_results = await asyncio.to_thread(search_tool.invoke, query)
+        search_results = await asyncio.to_thread(search_tool.invoke, improved_query)
         print(f"🌐 WEB_SEARCH: Got {len(search_results)} results")
         
     except Exception as e:
         print(f"🌐 WEB_SEARCH: Search failed: {e}")
         error_message = ToolMessage(
-            content=f"🔍 **Web Search**\n\n*Query: {query}*\n\n❌ Search failed: {str(e)}",
+            content=f"🔍 **Web Search**\n\n*Original: {query}*\n*Improved: {improved_query}*\n\n❌ Search failed: {str(e)}",
             tool_call_id=tool_call_id
         )
         return {
@@ -157,14 +237,14 @@ async def web_search(state: State, runtime: Runtime[Context]) -> Dict[str, Any]:
     
     search_content = json.dumps(search_results, indent=2)
     summarize_message = HumanMessage(
-        content=f"User query: {query}\n\nSearch results:\n{search_content}"
+        content=f"Original query: {query}\nImproved query: {improved_query}\n\nSearch results:\n{search_content}"
     )
     
     summary_response = await model.ainvoke([summarize_prompt, summarize_message])
     
     # Create single comprehensive tool message
     comprehensive_message = ToolMessage(
-        content=f"🔍 **Web Search**\n\n*Query: {query}*\n\n✅ Found {len(search_results)} results\n\n**Summary:**\n{summary_response.content}",
+        content=f"🔍 **Web Search**\n\n*Original: {query}*\n*Improved: {improved_query}*\n\n✅ Found {len(search_results)} results\n\n**Summary:**\n{summary_response.content}",
         tool_call_id=tool_call_id
     )
     
