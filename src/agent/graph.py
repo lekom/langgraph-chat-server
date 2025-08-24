@@ -67,15 +67,19 @@ async def preprocess_query(state: State, runtime: Runtime[Context]) -> Dict[str,
     
     # Use LLM to determine if search is needed
     model = ChatOpenAI(model='gpt-3.5-turbo', temperature=0)
-    
+
+    current_date = get_current_date_string()
+
     search_decision_prompt = SystemMessage(
-        content="""You are a search decision agent. Determine if the user's query requires current/recent information from the web.
+        content=f"""You are a search decision agent. Determine if the user's query requires current/recent information from the web.
 
         Return ONLY "YES" if the query needs web search (for current events, recent news, today's information, live data, etc.)
         Return ONLY "NO" if the query can be answered with general knowledge.
         
         Examples that need search: "What's the weather today?", "Latest news about AI", "Current stock price", "Recent events"
         Examples that don't need search: "How to code in Python?", "Explain quantum physics", "What is photosynthesis?"
+
+        The current date is {current_date}.  So there is no need to search for the current date.
         """
     )
     
@@ -98,9 +102,9 @@ async def generate_improved_query(state: State, original_query: str) -> str:
         # No prior context, return original query
         return original_query
     
-    # Build context string from recent conversation
+    # Build context string from entire conversation
     context_parts = []
-    for msg in context_messages[-5:]:  # Last 5 messages for context
+    for msg in context_messages:  # Use entire conversation history
         if isinstance(msg, dict):
             msg_type = msg.get('type', 'unknown')
             if msg_type == 'human':
@@ -128,8 +132,10 @@ async def generate_improved_query(state: State, original_query: str) -> str:
     # Use LLM to generate improved query
     model = ChatOpenAI(model='gpt-3.5-turbo', temperature=0)
     
+    current_date = get_current_date_string()
+
     improvement_prompt = SystemMessage(
-        content="""You are a search query optimizer. Given a conversation context and a user's search query, generate a more specific and effective web search query.
+        content=f"""You are a search query optimizer. Given a conversation context and a user's search query, generate a more specific and effective web search query.
 
         Guidelines:
         - If the query refers to pronouns (she, he, they, it), replace with specific names/entities from context
@@ -138,10 +144,12 @@ async def generate_improved_query(state: State, original_query: str) -> str:
         - Focus on searchable facts and proper nouns
         - If no context is relevant, return the original query
 
+        The current date is {current_date}.
+
         Examples:
-        Context: "Tell me about Rebecca Patel, the tech entrepreneur"
+        Context: "Tell me about Elizabeth Holmes, the tech entrepreneur"
         Query: "has she ever been to jail"
-        Improved: "Rebecca Patel criminal history arrest record"
+        Improved: "Elizabeth Holmes criminal history arrest record"
 
         Context: "We were discussing the iPhone 15"
         Query: "what are the specs"
@@ -218,7 +226,7 @@ async def web_search(state: State, runtime: Runtime[Context]) -> Dict[str, Any]:
     except Exception as e:
         print(f"🌐 WEB_SEARCH: Search failed: {e}")
         error_message = ToolMessage(
-            content=f"🔍 **Web Search**\n\n*Original: {query}*\n*Improved: {improved_query}*\n\n❌ Search failed: {str(e)}",
+            content=f"🔍 Web Search\n\nOriginal: {query}\nImproved: {improved_query}\n\n❌ Search failed: {str(e)}",
             tool_call_id=tool_call_id
         )
         return {
@@ -244,7 +252,7 @@ async def web_search(state: State, runtime: Runtime[Context]) -> Dict[str, Any]:
     
     # Create single comprehensive tool message
     comprehensive_message = ToolMessage(
-        content=f"🔍 **Web Search**\n\n*Original: {query}*\n*Improved: {improved_query}*\n\n✅ Found {len(search_results)} results\n\n**Summary:**\n{summary_response.content}",
+        content=f"🔍 Web Search: {improved_query}  ✅ Found {len(search_results)} results.  Summary: {summary_response.content}",
         tool_call_id=tool_call_id
     )
     
@@ -254,6 +262,18 @@ async def web_search(state: State, runtime: Runtime[Context]) -> Dict[str, Any]:
     }
 
 
+def get_current_date_string() -> str:
+    """Get current date and time in user's timezone formatted as 'Full_month day, year, current time in user's time zone'."""
+    from datetime import datetime
+    
+    # Get user's local timezone
+    local_tz = datetime.now().astimezone().tzinfo
+    current_datetime = datetime.now(local_tz)
+    
+    # Format: "Full_month day, year, current time in user's time zone"
+    return current_datetime.strftime("%B %d, %Y, %I:%M %p %Z")
+
+
 async def call_model(state: State, runtime: Runtime[Context]) -> Dict[str, Any]:
     """Process input and returns output.
 
@@ -261,9 +281,11 @@ async def call_model(state: State, runtime: Runtime[Context]) -> Dict[str, Any]:
     """
     # Get configuration
     model_name = 'gpt-4'
-    system_prompt = """keep all responses fewer than 100 words. If the prompt requires current information, 
+    current_date = get_current_date_string()
+    
+    system_prompt = f"""keep all responses fewer than 100 words. If the prompt requires current information, 
     use the search context to answer the question. If the prompt does not require current information,
-    answer the question with general knowledge."""
+    answer the question with general knowledge.  The current date is {current_date}."""
 
     # Initialize the model
     model = ChatOpenAI(model=model_name)
