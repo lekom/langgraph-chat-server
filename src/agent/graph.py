@@ -6,10 +6,13 @@ Returns a predefined response. Replace logic and configuration as needed.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, TypedDict
+from typing import Any, Dict, List, TypedDict, Annotated
+from operator import add
 
+from langchain_core.messages import BaseMessage, AIMessage, SystemMessage
 from langgraph.graph import StateGraph
 from langgraph.runtime import Runtime
+from langchain_openai import ChatOpenAI
 
 
 class Context(TypedDict):
@@ -19,7 +22,8 @@ class Context(TypedDict):
     See: https://langchain-ai.github.io/langgraph/cloud/how-tos/configuration_cloud/
     """
 
-    my_configurable_param: str
+    model_name: str
+    system_prompt: str
 
 
 @dataclass
@@ -30,7 +34,7 @@ class State:
     See: https://langchain-ai.github.io/langgraph/concepts/low_level/#state
     """
 
-    changeme: str = "example"
+    messages: Annotated[List[BaseMessage], add]
 
 
 async def call_model(state: State, runtime: Runtime[Context]) -> Dict[str, Any]:
@@ -38,10 +42,28 @@ async def call_model(state: State, runtime: Runtime[Context]) -> Dict[str, Any]:
 
     Can use runtime context to alter behavior.
     """
-    return {
-        "changeme": "output from call_model. "
-        f"Configured with {runtime.context.get('my_configurable_param')}"
-    }
+    # Get configuration
+    model_name = 'gpt-4'
+    system_prompt = 'keep all responses fewer than 100 words.'
+    
+    # Initialize the model
+    model = ChatOpenAI(model=model_name)
+    
+    # Prepare messages for the LLM
+    # Start with system message if this is the beginning of conversation
+    messages_for_llm = []
+    
+    # Add system message if no previous messages or first message isn't system
+    if not state.messages or not isinstance(state.messages[0], SystemMessage):
+        messages_for_llm.append(SystemMessage(content=system_prompt))
+    
+    # Add all conversation history
+    messages_for_llm.extend(state.messages)
+    
+    # Call the LLM with full conversation context
+    response = await model.ainvoke(messages_for_llm)
+    
+    return {"messages": [response]}
 
 
 # Define the graph
